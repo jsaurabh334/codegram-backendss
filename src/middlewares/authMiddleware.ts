@@ -65,3 +65,4 @@ export const validateInput = (schema: z.ZodSchema) => {
             res.status(500).json({ error: 'Validation error' });
         }
     };
+}

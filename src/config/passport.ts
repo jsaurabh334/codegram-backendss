@@ -114,3 +114,4 @@ export const configurePassport = (passport: PassportStatic) => {
             done(error, false);
         }
     });
+}
