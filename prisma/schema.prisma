@@ -1,0 +1,354 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- ENUMS ---
+enum Role {
+  USER
+  ADMIN
+  BLOCKED
+}
+
+enum BugSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum BugStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum Theme {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+enum ReportReason {
+  SPAM
+  HARASSMENT
+  INAPPROPRIATE_CONTENT
+  COPYRIGHT_VIOLATION
+  FAKE_ACCOUNT
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  RESOLVED
+  DISMISSED
+}
+
+enum NotificationType {
+  LIKE
+  COMMENT
+  FOLLOW
+  REPLY
+  BOOKMARK
+  BUG_STATUS_UPDATE 
+}
+
+// --- MODELS ---
+model User {
+  id              String    @id @default(cuid())
+  githubId        String    @unique
+  username        String    @unique
+  email           String    @unique
+  name            String?
+  bio             String?
+  avatar          String?
+  gender          String?
+  githubUrl       String?
+  website         String?
+  location        String?
+  techStack       String[]  @default([])
+  role            Role      @default(USER)
+  isBlocked       Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  twitterUsername String?
+  company         String?
+  publicRepos     Int?
+  followersCount  Int?
+  followingCount  Int?
+  githubCreatedAt DateTime?
+
+  // Relations
+  snippets          Snippet[]
+  docs              Doc[]
+  bugs              Bug[]
+  comments          Comment[]
+  likes             Like[]
+  bookmarks         Bookmark[]
+  following         Follow[]         @relation("Follower")
+  followers         Follow[]         @relation("Following")
+  blockedUsers      BlockedUser[]    @relation("Blocker")
+  blockedBy         BlockedUser[]    @relation("Blocked")
+  preferences       UserPreferences?
+  reports           Report[]         @relation("Reporter")
+  reportedBy        Report[]         @relation("Reported")
+  notifications     Notification[]   @relation("Recipient")
+  sentNotifications Notification[]   @relation("Sender")
+  bugViews          BugView[]
+
+  @@map("users")
+}
+
+model UserPreferences {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  theme         Theme    @default(SYSTEM)
+  language      String   @default("en")
+  notifications Json     @default("{\"email\": true, \"push\": true, \"mentions\": true, \"likes\": true, \"comments\": true, \"follows\": true}")
+  privacy       Json     @default("{\"showEmail\": false, \"showLocation\": true, \"profileVisibility\": \"public\"}")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}
+
+model Snippet {
+  id            String       @id @default(cuid())
+  title         String
+  description   String?
+  content       String
+  language      String
+  tags          String[]     @default([])
+  isPublic      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  authorId      String
+  // Relations
+  author        User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  comments      Comment[]
+  likes         Like[]
+  bookmarks     Bookmark[]
+  reports       Report[]
+  notifications Notification[]
+
+  @@index([authorId])
+  @@index([language])
+  @@map("snippets")
+}
+
+model Doc {
+  id            String       @id @default(cuid())
+  title         String
+  description   String?
+  content       String
+  coverImage    String?
+  tags          String[]     @default([])
+  isPublic      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  authorId      String
+  // Relations
+  author        User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  comments      Comment[]
+  likes         Like[]
+  bookmarks     Bookmark[]
+  reports       Report[]
+  notifications Notification[]
+
+  @@index([authorId])
+  @@map("docs")
+}
+
+model Bug {
+  id            String       @id @default(cuid())
+  title         String
+  description   String
+  content       String
+  severity      BugSeverity  @default(MEDIUM)
+  status        BugStatus    @default(OPEN)
+  tags          String[]     @default([])
+  media         String[]     @default([])
+  expiresAt     DateTime
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  authorId      String
+  // Relations
+  author        User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  comments      Comment[]
+  likes         Like[]
+  bookmarks     Bookmark[]
+  reports       Report[]
+  notifications Notification[]
+  views         BugView[]
+
+  @@index([authorId])
+  @@index([expiresAt])
+  @@map("bugs")
+}
+
+model BugView {
+  id        String   @id @default(cuid())
+  bugId     String
+  userId    String
+  createdAt DateTime @default(now())
+
+  bug  Bug  @relation(fields: [bugId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([bugId, userId])
+  @@map("bug_views")
+}
+
+model Comment {
+  id        String    @id @default(cuid())
+  content   String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  authorId  String
+  snippetId String?
+  docId     String?
+  bugId     String?
+  parentId  String?
+  // Relations
+  author    User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  snippet   Snippet?  @relation(fields: [snippetId], references: [id], onDelete: Cascade)
+  doc       Doc?      @relation(fields: [docId], references: [id], onDelete: Cascade)
+  bug       Bug?      @relation(fields: [bugId], references: [id], onDelete: Cascade)
+  parent    Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   Comment[] @relation("CommentReplies")
+  reports   Report[]
+  notifications Notification[]
+
+  @@index([authorId])
+  @@index([snippetId])
+  @@index([docId])
+  @@index([bugId])
+  @@index([parentId])
+  @@map("comments")
+}
+
+model Like {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  userId    String
+  snippetId String?
+  docId     String?
+  bugId     String?
+
+  // Relations
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snippet Snippet? @relation(fields: [snippetId], references: [id], onDelete: Cascade)
+  doc     Doc?     @relation(fields: [docId], references: [id], onDelete: Cascade)
+  bug     Bug?     @relation(fields: [bugId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, snippetId])
+  @@unique([userId, docId])
+  @@unique([userId, bugId])
+  @@map("likes")
+}
+
+model Bookmark {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  userId    String
+  snippetId String?
+  docId     String?
+  bugId     String?
+
+  // Relations
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snippet Snippet? @relation(fields: [snippetId], references: [id], onDelete: Cascade)
+  doc     Doc?     @relation(fields: [docId], references: [id], onDelete: Cascade)
+  bug     Bug?     @relation(fields: [bugId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, snippetId])
+  @@unique([userId, docId])
+  @@unique([userId, bugId])
+  @@map("bookmarks")
+}
+
+model Follow {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  followerId  String
+  followingId String
+
+  // Relations
+  follower  User @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+model BlockedUser {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  blockerId String
+  blockedId String
+
+  // Relations
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@map("blocked_users")
+}
+
+model Report {
+  id          String       @id @default(cuid())
+  reason      ReportReason
+  description String?
+  status      ReportStatus @default(PENDING)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  // Relations
+  reporterId  String
+  reporter    User         @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedId  String
+  reported    User         @relation("Reported", fields: [reportedId], references: [id], onDelete: Cascade)
+  snippetId   String?
+  snippet     Snippet?     @relation(fields: [snippetId], references: [id], onDelete: Cascade)
+  docId       String?
+  doc         Doc?         @relation(fields: [docId], references: [id], onDelete: Cascade)
+  bugId       String?
+  bug         Bug?         @relation(fields: [bugId], references: [id], onDelete: Cascade)
+  commentId   String?
+  comment     Comment?     @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@map("reports")
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  type        NotificationType
+  recipientId String
+  senderId    String
+  read        Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+
+  // Relations
+  recipient   User             @relation("Recipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  sender      User             @relation("Sender", fields: [senderId], references: [id], onDelete: Cascade)
+  snippet     Snippet?         @relation(fields: [snippetId], references: [id], onDelete: Cascade)
+  snippetId   String?
+  doc         Doc?             @relation(fields: [docId], references: [id], onDelete: Cascade)
+  docId       String?
+  bug         Bug?             @relation(fields: [bugId], references: [id], onDelete: Cascade)
+  bugId       String?
+  comment     Comment?         @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  commentId   String?
+
+  @@index([recipientId])
+  @@map("notifications")
+}
