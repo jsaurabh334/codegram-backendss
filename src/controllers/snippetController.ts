@@ -3,6 +3,8 @@ import { prisma } from '../config/db';
 import { z } from 'zod';
 import { emitToFollowers } from '../socket';
 import { Snippet, Like, Bookmark } from '@prisma/client';
+import { logger } from '../utils/logger';
+import { cache } from '../utils/cache';
 
 // Type for the author object included in queries
 type AuthorInfo = {
@@ -59,16 +61,40 @@ const snippetSchema = z.object({
   isPublic: z.boolean().default(true),
 });
 
+// Update schema with field whitelisting
+const snippetUpdateSchema = z.object({
+  title: z.string().min(1).max(100).optional(),
+  description: z.string().max(500).optional(),
+  content: z.string().min(1).optional(),
+  language: z.string().min(1).optional(),
+  tags: z.array(z.string().max(50)).max(10).optional(),
+  isPublic: z.boolean().optional(),
+});
+
+// Search validation schema
+const searchSchema = z.object({
+  page: z.coerce.number().min(1).default(1),
+  limit: z.coerce.number().min(1).max(50).default(10),
+  search: z.string().max(100).optional(),
+  tags: z.string().max(200).optional(),
+  language: z.string().max(50).optional(),
+  sort: z.enum(['recent', 'popular', 'liked', 'commented']).default('recent'),
+});
+
 // Get all snippets with pagination
 export const getAllSnippets = async (req: Request, res: Response) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 10;
-    const search = req.query.search as string;
-    const tags = req.query.tags as string;
-    const language = req.query.language as string;
-    const sortBy = req.query.sort as string || 'recent';
+    // Validate query parameters
+    const validatedQuery = searchSchema.parse(req.query);
+    const { page, limit, search, tags, language, sort: sortBy } = validatedQuery;
     const skip = (page - 1) * limit;
+
+    // Create cache key
+    const cacheKey = `snippets:${JSON.stringify(validatedQuery)}:${(req.user as any)?.id || 'anonymous'}`;
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
 
     const where: any = { isPublic: true };
 
@@ -171,14 +197,28 @@ export const getAllSnippets = async (req: Request, res: Response) => {
       bookmarks: undefined,
     }));
 
-    res.json({
+    const result = {
       snippets: formattedSnippets,
       total,
       pages: Math.ceil(total / limit),
       currentPage: page,
       hasMore: skip + limit < total,
-    });
+    };
+
+    // Cache the result for 5 minutes
+    cache.set(cacheKey, result, 5 * 60 * 1000);
+
+    res.json(result);
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: 'Invalid query parameters',
+        details: error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message,
+        }))
+      });
+    }
     console.error('Error fetching snippets:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -386,13 +426,17 @@ export const updateSnippet = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    const validatedData = snippetSchema.parse(req.body);
+    // Use update schema with field whitelisting
+    const validatedData = snippetUpdateSchema.parse(req.body);
     
     // Clean and validate tags
-    const cleanTags = validatedData.tags
-      .map(tag => tag.trim().toLowerCase())
-      .filter(tag => tag.length > 0 && tag.length <= 50)
-      .slice(0, 10); // Limit to 10 tags
+    let cleanTags = snippet.tags; // Keep existing tags if not updating
+    if (validatedData.tags) {
+      cleanTags = validatedData.tags
+        .map(tag => tag.trim().toLowerCase())
+        .filter(tag => tag.length > 0 && tag.length <= 50)
+        .slice(0, 10); // Limit to 10 tags
+    }
     
     const updatedSnippet = await prisma.snippet.update({
       where: { id: snippetId },
@@ -432,6 +476,9 @@ export const updateSnippet = async (req: Request, res: Response) => {
       },
     });
 
+    // Clear related cache entries
+    cache.delete(`snippet:${snippetId}`);
+
     const updatedSnippetWithInteractions = updatedSnippet as SnippetWithDetails;
 
     // Format response
@@ -446,6 +493,12 @@ export const updateSnippet = async (req: Request, res: Response) => {
       likes: undefined,
       bookmarks: undefined,
     };
+
+    logger.info('Snippet updated:', {
+      snippetId,
+      userId,
+      title: updatedSnippet.title,
+    });
 
     res.json(formattedSnippet);
   } catch (error) {

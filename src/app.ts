@@ -4,12 +4,15 @@ import helmet from 'helmet';
 import session from 'express-session';
 import passport from 'passport';
 import cron from 'node-cron';
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import swaggerUi from 'swagger-ui-express';
 import rateLimit from 'express-rate-limit';
 import fs from 'fs';
+import { authLimiter, uploadLimiter, apiLimiter, enhancedCSP, sanitizeInput, validatePagination } from './middlewares/securityMiddleware';
+import { env, getSessionConfig } from './config/environment';
+import { checkDatabaseHealth } from './config/db';
+import { logger } from './utils/logger';
 const swaggerFile = JSON.parse(fs.readFileSync('./swagger-output.json', 'utf-8'));
 
 import { prisma } from './config/db';
@@ -32,7 +35,6 @@ import settingsRoutes from './routes/settingsRoutes';
 import feedRoutes from './routes/feedRoutes';
 import notificationRoutes from './routes/notificationRoutes';
 
-dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,8 +42,8 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 // --- CORS Configuration ---
-const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-const backendUrl = process.env.BACKEND_URL || 'http://localhost:3001';
+const frontendUrl = env.FRONTEND_URL;
+const backendUrl = env.BACKEND_URL;
 
 const whitelist = [frontendUrl, backendUrl];
 
@@ -60,6 +62,7 @@ const corsOptions: CorsOptions = {
     if (!origin || whitelist.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
+      logger.warn('CORS blocked request from origin:', origin);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -72,46 +75,23 @@ app.use(cors(corsOptions));
 
 // --- Security Middleware ---
 app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-        'script-src': ["'self'", 'https://cdn.redoc.ly', "'unsafe-inline'"],
-        'font-src': ["'self'", 'https://fonts.gstatic.com'],
-        'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-        'worker-src': ["'self'", 'blob:'],
-        'img-src': ["'self'", 'data:', 'https://online.swagger.io']
-      },
-    },
-  })
+  helmet(enhancedCSP)
 );
 
-// --- Rate Limiting ---
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per window
-  standardHeaders: true,
-  legacyHeaders: false, 
-});
-app.use('/api', limiter); // Apply to all API routes
+// --- Enhanced Rate Limiting ---
+app.use('/api', apiLimiter);
+app.use('/api/auth', authLimiter);
+app.use('/api/upload', uploadLimiter);
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use(sanitizeInput);
 
 app.use(express.static(path.join(__dirname, '../public')));
 app.use('/swagger-output.json', express.static(path.join(__dirname, '../swagger-output.json')));
 
 // --- Session and Passport Configuration ---
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'your-secret-key',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: process.env.NODE_ENV === 'production',
-    httpOnly: true,
-    maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
-  },
-}));
+app.use(session(getSessionConfig()));
 
 configurePassport(passport);
 app.use(passport.initialize());
@@ -130,7 +110,26 @@ const swaggerUiOptions = {
 };
 app.use('/api-docs-ui', swaggerUi.serve, swaggerUi.setup(swaggerFile, swaggerUiOptions));
 
+// --- Health Check with Database ---
+app.get('/health', async (req, res) => {
+  const dbHealthy = await checkDatabaseHealth();
+  const status = dbHealthy ? 'OK' : 'UNHEALTHY';
+  const statusCode = dbHealthy ? 200 : 503;
+  
+  res.status(statusCode).json({ 
+    status,
+    timestamp: new Date().toISOString(),
+    database: dbHealthy ? 'connected' : 'disconnected',
+    environment: env.NODE_ENV,
+  });
+});
 // --- API Routes ---
+// Add pagination validation to routes that need it
+app.use('/api/snippets', validatePagination);
+app.use('/api/docs', validatePagination);
+app.use('/api/bugs', validatePagination);
+app.use('/api/feed', validatePagination);
+
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/snippets', snippetRoutes);
@@ -149,22 +148,37 @@ app.use('/api/notifications', notificationRoutes);
 
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
-// --- Health Check ---
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
-});
 
-// --- Cron Job ---
-cron.schedule('0 * * * *', async () => {
+// --- Distributed Cron Job (only run on primary instance) ---
+const isPrimaryInstance = process.env.PRIMARY_INSTANCE === 'true' || env.NODE_ENV === 'development';
+
+if (isPrimaryInstance) {
+  cron.schedule('0 * * * *', async () => {
     try {
       await prisma.bug.deleteMany({ where: { expiresAt: { lt: new Date() } } });
-      console.log('Expired bugs cleaned up');
+      logger.info('Expired bugs cleaned up');
     } catch (error) {
-      console.error('Error cleaning up expired bugs:', error);
+      logger.error('Error cleaning up expired bugs:', error);
     }
-});
+  });
+  logger.info('Cron jobs initialized on primary instance');
+} else {
+  logger.info('Cron jobs skipped on secondary instance');
+}
 
 // --- Error Handling ---
 app.use(errorHandler);
 
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, shutting down gracefully');
+  await prisma.$disconnect();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  logger.info('SIGINT received, shutting down gracefully');
+  await prisma.$disconnect();
+  process.exit(0);
+});
 export default app;
